@@ -1,0 +1,49 @@
+{% extends '_base.html' %}
+
+{% block title %}Admin Dashboard{% endblock %}
+
+{% block content %}
+    <h2>Admin Dashboard</h2>
+    <p>Welcome, Administrator!</p>
+    <p><a href="{{ url_for('create_notice') }}" class="button primary">Create New Notice</a></p>
+
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Category</th>
+                <th>Urgent</th>
+                <th>Active</th>
+                <th>Created At</th>
+                <th>Expires At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if notices %}
+                {% for notice in notices %}
+                <tr class="{% if not notice.is_active %}inactive{% endif %} {% if notice.is_urgent %}urgent{% endif %}">
+                    <td>{{ notice.id }}</td>
+                    <td>{{ notice.title }}</td>
+                    <td>{{ notice.category.capitalize() }}</td>
+                    <td>{{ 'Yes' if notice.is_urgent else 'No' }}</td>
+                    <td>{{ 'Yes' if notice.is_active else 'No' }}</td>
+                    <td>{{ notice.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td>{{ notice.expires_at.strftime('%Y-%m-%d') if notice.expires_at else 'N/A' }}</td>
+                    <td class="actions">
+                        <a href="{{ url_for('edit_notice', id=notice.id) }}" class="button small edit">Edit</a>
+                        <form action="{{ url_for('delete_notice', id=notice.id) }}" method="post" style="display:inline;">
+                            <button type="submit" class="button small delete" onclick="return confirm('Are you sure you want to delete this notice?');">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="8">No notices created yet.</td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+{% endblock %}

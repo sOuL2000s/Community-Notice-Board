@@ -1,0 +1,17 @@
+{% extends '_base.html' %}
+
+{% block title %}Admin Login{% endblock %}
+
+{% block content %}
+    <h2>Admin Login</h2>
+    <form method="post" class="auth-form">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required>
+
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+
+        <button type="submit">Log In</button>
+    </form>
+    <p>Default Admin: <strong>admin</strong> / <strong>password</strong> (Please change immediately in `app.py` for production!)</p>
+{% endblock %}

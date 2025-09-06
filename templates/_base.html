@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Community Notice Board{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1><a href="{{ url_for('index') }}">Community Notice Board</a></h1>
+            <nav>
+                <a href="{{ url_for('index') }}">Home</a>
+                {% if session.get('logged_in') %}
+                    <a href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+                    <a href="{{ url_for('admin_logout') }}">Logout</a>
+                {% else %}
+                    <a href="{{ url_for('admin_login') }}">Admin Login</a>
+                {% endif %}
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <ul class="flashes">
+                    {% for category, message in messages %}
+                        <li class="flash-{{ category }}">{{ message }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; {{ datetime.now().year }} Community Notice Board</p>
+        </div>
+    </footer>
+</body>
+</html>

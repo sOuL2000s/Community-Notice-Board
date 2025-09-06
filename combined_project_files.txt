@@ -1,0 +1,1033 @@
+
+--- START FILE: 1.py ---
+
+import os
+print(os.urandom(24).hex()) # Run this in a Python interpreter to get a random key
+
+--- END FILE: 1.py ---
+
+--- START FILE: app.py ---
+
+import sqlite3
+from flask import Flask, render_template, request, url_for, flash, redirect, g, session
+from datetime import datetime
+import functools
+
+# --- Application Setup ---
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'd512faa2cba84c4c8bd6f17d4f171dab9306e40795177ef0' # Change this to a strong, random key!
+DATABASE = 'community_notice_board.db'
+
+@app.context_processor
+def inject_now():
+    """Injects the datetime object into all templates."""
+    return {'datetime': datetime}
+
+# --- Database Helper Functions ---
+def get_db():
+    """Establishes a database connection or returns the existing one."""
+    if 'db' not in g:
+        g.db = sqlite3.connect(
+            DATABASE,
+            detect_types=sqlite3.PARSE_DECLTYPES
+        )
+        g.db.row_factory = sqlite3.Row # Allows accessing columns by name
+        # --- ADD THIS LINE FOR CUSTOM TIMESTAMP CONVERTER ---
+        #g.db.create_function("DATETIME_FROM_ISO", 1, lambda s: datetime.fromisoformat(s) if s else None)
+    return g.db
+
+def close_db(e=None):
+    """Closes the database connection at the end of the request."""
+    db = g.pop('db', None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    """Initializes the database from schema.sql."""
+    db = get_db()
+    with app.open_resource('schema.sql', mode='r') as f:
+        db.cursor().executescript(f.read())
+    db.commit()
+
+@app.cli.command('init-db')
+def init_db_command():
+    """Clears the existing data and creates new tables."""
+    init_db()
+    #flash('Initialized the database.') # This message won't show in CLI, but good practice.
+    print("Database initialized successfully.")
+
+app.teardown_appcontext(close_db) # Register close_db to be called after each request
+
+# --- Authentication Decorator ---
+def login_required(view):
+    """Decorator to ensure a user is logged in before accessing a view."""
+    @functools.wraps(view)
+    def wrapped_view(**kwargs):
+        if session.get('logged_in') is None:
+            flash('Please log in to access this page.', 'warning')
+            return redirect(url_for('admin_login'))
+        return view(**kwargs)
+    return wrapped_view
+
+# --- Hardcoded Admin Credentials (For MVP - In production, use hashed passwords!) ---
+ADMIN_USERNAME = 'admin'
+ADMIN_PASSWORD = 'password' # **DO NOT USE THIS IN PRODUCTION**
+
+# --- Routes ---
+
+@app.route('/')
+def index():
+    """Public facing page: Displays active notices."""
+    db = get_db()
+    now = datetime.now().isoformat()
+    # Fetch notices that are active and not expired
+    # Order by urgent first, then creation date
+    notices = db.execute(
+        """
+        SELECT id, title, content, category, is_urgent, created_at, expires_at,
+               event_date, event_time, event_location
+        FROM notices
+        WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > ?)
+        ORDER BY is_urgent DESC, created_at DESC
+        """,
+        (now,)
+    ).fetchall()
+    return render_template('index.html', notices=notices)
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin_login():
+    """Admin login page."""
+    if session.get('logged_in'):
+        return redirect(url_for('admin_dashboard'))
+
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        error = None
+
+        if username != ADMIN_USERNAME or password != ADMIN_PASSWORD:
+            error = 'Invalid Credentials.'
+
+        if error is None:
+            session['logged_in'] = True
+            flash('Logged in successfully!', 'success')
+            return redirect(url_for('admin_dashboard'))
+        else:
+            flash(error, 'danger')
+
+    return render_template('admin_login.html')
+
+@app.route('/admin/logout')
+def admin_logout():
+    """Logs the admin out."""
+    session.pop('logged_in', None)
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('admin_login'))
+
+@app.route('/admin/dashboard')
+@login_required
+def admin_dashboard():
+    db = get_db()
+    raw_notices = db.execute(
+        """
+        SELECT id, title, category, is_urgent, created_at,
+               expires_at, -- Change back to just expires_at
+               event_date, event_time, event_location, is_active
+        FROM notices
+        ORDER BY created_at DESC
+        """
+    ).fetchall()
+
+    # Post-process the notices to convert datetime strings
+    processed_notices = []
+    for notice_row in raw_notices:
+        notice = dict(notice_row) # Convert Row object to a mutable dictionary
+        if notice['expires_at']:
+            notice['expires_at'] = datetime.fromisoformat(notice['expires_at'])
+        
+        # created_at should always have a value, so direct conversion is fine
+        notice['created_at'] = datetime.fromisoformat(notice['created_at'])
+        processed_notices.append(notice)
+
+    return render_template('admin_dashboard.html', notices=processed_notices)
+
+def get_notice(notice_id, check_active=True):
+    db = get_db()
+    query = """
+        SELECT id, title, content, category, is_urgent, created_at,
+               expires_at, -- Change back to just expires_at
+               event_date, event_time, event_location, is_active
+        FROM notices
+        WHERE id = ?
+    """
+    if check_active:
+        query += " AND is_active = 1"
+    
+    notice_row = db.execute(query, (notice_id,)).fetchone()
+
+    if notice_row is None:
+        flash('Notice not found.', 'danger')
+        return None
+    
+    # Convert Row object to a mutable dictionary
+    notice = dict(notice_row)
+
+    # Convert datetime strings to datetime objects
+    if notice['expires_at']:
+        notice['expires_at'] = datetime.fromisoformat(notice['expires_at'])
+    notice['created_at'] = datetime.fromisoformat(notice['created_at']) # Should always exist
+
+    return notice
+
+@app.route('/admin/notice/new', methods=['GET', 'POST'])
+@login_required
+def create_notice():
+    """Admin route to create a new notice."""
+    if request.method == 'POST':
+        title = request.form['title']
+        content = request.form['content']
+        category = request.form['category']
+        is_urgent = 'is_urgent' in request.form
+        expires_at = request.form.get('expires_at') or None
+        event_date = request.form.get('event_date') or None
+        event_time = request.form.get('event_time') or None
+        event_location = request.form.get('event_location') or None
+        is_active = 'is_active' in request.form # For admin to control visibility
+
+        error = None
+        if not title:
+            error = 'Title is required.'
+        if not content:
+            error = 'Content is required.'
+
+        if error is not None:
+            flash(error, 'danger')
+        else:
+            db = get_db()
+            db.execute(
+                """
+                INSERT INTO notices (title, content, category, is_urgent, created_at, expires_at,
+                                     event_date, event_time, event_location, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (title, content, category, is_urgent, datetime.now().isoformat(), expires_at,
+                 event_date, event_time, event_location, is_active)
+            )
+            db.commit()
+            flash('Notice created successfully!', 'success')
+            return redirect(url_for('admin_dashboard'))
+
+    return render_template('create_edit_notice.html', notice=None)
+
+@app.route('/admin/notice/<int:id>/edit', methods=['GET', 'POST'])
+@login_required
+def edit_notice(id):
+    """Admin route to edit an existing notice."""
+    notice = get_notice(id, check_active=False) # Get notice regardless of active status
+    if notice is None:
+        return redirect(url_for('admin_dashboard'))
+
+    if request.method == 'POST':
+        title = request.form['title']
+        content = request.form['content']
+        category = request.form['category']
+        is_urgent = 'is_urgent' in request.form
+        expires_at = request.form.get('expires_at') or None
+        event_date = request.form.get('event_date') or None
+        event_time = request.form.get('event_time') or None
+        event_location = request.form.get('event_location') or None
+        is_active = 'is_active' in request.form
+
+        error = None
+        if not title:
+            error = 'Title is required.'
+        if not content:
+            error = 'Content is required.'
+
+        if error is not None:
+            flash(error, 'danger')
+        else:
+            db = get_db()
+            db.execute(
+                """
+                UPDATE notices
+                SET title = ?, content = ?, category = ?, is_urgent = ?, expires_at = ?,
+                    event_date = ?, event_time = ?, event_location = ?, is_active = ?
+                WHERE id = ?
+                """,
+                (title, content, category, is_urgent, expires_at,
+                 event_date, event_time, event_location, is_active, id)
+            )
+            db.commit()
+            flash('Notice updated successfully!', 'success')
+            return redirect(url_for('admin_dashboard'))
+
+    return render_template('create_edit_notice.html', notice=notice)
+
+@app.route('/admin/notice/<int:id>/delete', methods=['POST'])
+@login_required
+def delete_notice(id):
+    """Admin route to delete a notice."""
+    notice = get_notice(id, check_active=False) # Get notice regardless of active status
+    if notice is None:
+        return redirect(url_for('admin_dashboard'))
+
+    db = get_db()
+    db.execute('DELETE FROM notices WHERE id = ?', (id,))
+    db.commit()
+    flash('Notice deleted successfully!', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+# --- Run the application ---
+if __name__ == '__main__':
+    app.run(debug=True) # Set debug=False for production!
+
+--- END FILE: app.py ---
+
+--- START FILE: combined.py ---
+
+import os
+
+def combine_files_to_single_file(root_dir, output_filename="combined_project_files.txt"):
+    """
+    Combines the content of all files in a directory into a single file,
+    excluding 'node_modules' directories and 'package-lock.json' files.
+
+    Args:
+        root_dir (str): The root directory of the project.
+        output_filename (str): The name of the output file.
+    """
+    combined_content = []
+    excluded_dirs = ['__pycache__', '.pycache', 'venv', 'node_modules', '.git', '.vscode', '.idea', 'dist', 'build']
+    excluded_files = ['package-lock.json', 'yarn.lock', 'bun.lockb', '.env'] # Added .env as it might contain sensitive info
+
+    print(f"Starting to combine files from: {root_dir}")
+    print(f"Excluding directories: {excluded_dirs}")
+    print(f"Excluding files: {excluded_files}")
+
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Modify dirnames in-place to skip excluded directories
+        dirnames[:] = [d for d in dirnames if d not in excluded_dirs]
+
+        for filename in filenames:
+            if filename in excluded_files:
+                print(f"Skipping excluded file: {os.path.join(dirpath, filename)}")
+                continue
+
+            file_path = os.path.join(dirpath, filename)
+            # Make path relative to root_dir for the header
+            relative_file_path = os.path.relpath(file_path, root_dir)
+
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                combined_content.append(f"\n--- START FILE: {relative_file_path} ---\n\n")
+                combined_content.append(content)
+                combined_content.append(f"\n\n--- END FILE: {relative_file_path} ---\n")
+                print(f"Included file: {relative_file_path}")
+            except UnicodeDecodeError:
+                print(f"Skipping binary or undecodable file (UnicodeDecodeError): {relative_file_path}")
+            except Exception as e:
+                print(f"Error reading file {relative_file_path}: {e}")
+
+    output_path = os.path.join(root_dir, output_filename)
+    try:
+        with open(output_path, 'w', encoding='utf-8') as outfile:
+            outfile.write("".join(combined_content))
+        print(f"\nSuccessfully combined all files into: {output_path}")
+    except Exception as e:
+        print(f"Error writing output file {output_path}: {e}")
+
+if __name__ == "__main__":
+    # Get the current working directory where the script is run
+    # This assumes you run the script from your project's root directory
+    project_root = os.getcwd()
+    combine_files_to_single_file(project_root)
+
+
+--- END FILE: combined.py ---
+
+--- START FILE: schema.sql ---
+
+DROP TABLE IF EXISTS notices;
+
+CREATE TABLE notices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL, -- e.g., 'announcement', 'event', 'urgent' (though is_urgent also exists)
+    is_urgent BOOLEAN NOT NULL DEFAULT 0, -- 1 for urgent, 0 for regular
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NULL, -- Optional expiry date
+    event_date DATE NULL,
+    event_time TIME NULL,
+    event_location TEXT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT 1 -- 1 for active, 0 for inactive/draft (admin can toggle)
+);
+
+--- END FILE: schema.sql ---
+
+--- START FILE: static\favicon.ico ---
+
+
+
+--- END FILE: static\favicon.ico ---
+
+--- START FILE: static\style.css ---
+
+/* General Body & Typography */
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+    background-color: #f4f4f4;
+    color: #333;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+h1, h2, h3 {
+    color: #333;
+    margin-bottom: 15px;
+}
+
+h1 a {
+    text-decoration: none;
+    color: inherit;
+}
+
+/* Header */
+header {
+    background-color: #007bff;
+    color: white;
+    padding: 1rem 0;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+header h1 {
+    margin: 0;
+    display: inline-block;
+}
+
+header nav {
+    float: right;
+    margin-top: 5px;
+}
+
+header nav a {
+    color: white;
+    text-decoration: none;
+    padding: 5px 10px;
+    margin-left: 10px;
+    border-radius: 4px;
+}
+
+header nav a:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Footer */
+footer {
+    text-align: center;
+    padding: 20px;
+    margin-top: 30px;
+    background-color: #eee;
+    color: #555;
+    border-top: 1px solid #ddd;
+}
+
+/* Flash Messages */
+.flashes {
+    list-style: none;
+    padding: 0;
+    margin: 20px 0;
+}
+
+.flashes li {
+    padding: 10px 15px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    font-weight: bold;
+}
+
+.flash-success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.flash-danger {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.flash-warning {
+    background-color: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeeba;
+}
+
+.flash-info {
+    background-color: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+}
+
+/* Buttons */
+.button {
+    display: inline-block;
+    padding: 8px 15px;
+    margin: 5px 0;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    text-decoration: none;
+    font-size: 0.9em;
+    transition: background-color 0.2s ease;
+}
+
+.button.primary {
+    background-color: #007bff;
+    color: white;
+}
+.button.primary:hover {
+    background-color: #0056b3;
+}
+
+.button.edit {
+    background-color: #ffc107;
+    color: #333;
+}
+.button.edit:hover {
+    background-color: #e0a800;
+}
+
+.button.delete {
+    background-color: #dc3545;
+    color: white;
+}
+.button.delete:hover {
+    background-color: #c82333;
+}
+
+.button.small {
+    padding: 5px 10px;
+    font-size: 0.8em;
+}
+
+/* Notice Board - Public View */
+.notice-list {
+    display: grid;
+    gap: 20px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+.notice-item {
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    border-left: 5px solid #007bff; /* Default accent */
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.notice-item:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.15);
+}
+
+.notice-item h3 {
+    margin-top: 0;
+    color: #007bff;
+}
+
+.notice-item.urgent {
+    border-left-color: #dc3545;
+    background-color: #fff0f0;
+}
+.notice-item.urgent h3 {
+    color: #dc3545;
+}
+
+.notice-item.event {
+    border-left-color: #28a745;
+}
+.notice-item.event h3 {
+    color: #28a745;
+}
+
+.notice-meta {
+    font-size: 0.85em;
+    color: #666;
+    margin-bottom: 10px;
+}
+
+.event-details {
+    margin-top: 15px;
+    padding-top: 10px;
+    border-top: 1px dashed #ddd;
+    font-size: 0.9em;
+}
+
+/* Admin Forms */
+.auth-form, .notice-form {
+    background-color: white;
+    padding: 30px;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    margin-top: 20px;
+    max-width: 600px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.auth-form label, .notice-form label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.auth-form input[type="text"],
+.auth-form input[type="password"],
+.notice-form input[type="text"],
+.notice-form input[type="date"],
+.notice-form input[type="time"],
+.notice-form textarea,
+.notice-form select {
+    width: calc(100% - 20px);
+    padding: 10px;
+    margin-bottom: 20px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 1em;
+}
+
+.checkbox-group {
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+}
+
+.checkbox-group input[type="checkbox"] {
+    margin-right: 10px;
+    width: auto;
+}
+
+.checkbox-group label {
+    margin-bottom: 0;
+    font-weight: normal;
+}
+
+
+.auth-form button, .notice-form button {
+    width: 100%;
+    padding: 12px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 1.1em;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.auth-form button:hover, .notice-form button:hover {
+    background-color: #0056b3;
+}
+
+/* Admin Dashboard Table */
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 20px;
+    background-color: white;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.admin-table th, .admin-table td {
+    border: 1px solid #ddd;
+    padding: 12px;
+    text-align: left;
+}
+
+.admin-table th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+    color: #555;
+}
+
+.admin-table tbody tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+.admin-table tbody tr:hover {
+    background-color: #e9ecef;
+}
+
+.admin-table .actions a, .admin-table .actions button {
+    margin-right: 5px;
+    vertical-align: middle;
+}
+
+.admin-table tr.inactive {
+    opacity: 0.6;
+    background-color: #f8f9fa;
+    font-style: italic;
+}
+
+.admin-table tr.urgent {
+    background-color: #ffe0e0;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    header h1 {
+        display: block;
+        text-align: center;
+        margin-bottom: 10px;
+    }
+    header nav {
+        float: none;
+        text-align: center;
+    }
+    header nav a {
+        margin: 0 5px;
+    }
+    .notice-list {
+        grid-template-columns: 1fr;
+    }
+    .admin-table th, .admin-table td {
+        padding: 8px;
+        font-size: 0.9em;
+    }
+    .admin-table .actions {
+        white-space: nowrap;
+    }
+}
+
+--- END FILE: static\style.css ---
+
+--- START FILE: templates\admin_dashboard.html ---
+
+{% extends '_base.html' %}
+
+{% block title %}Admin Dashboard{% endblock %}
+
+{% block content %}
+    <h2>Admin Dashboard</h2>
+    <p>Welcome, Administrator!</p>
+    <p><a href="{{ url_for('create_notice') }}" class="button primary">Create New Notice</a></p>
+
+    <table class="admin-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Category</th>
+                <th>Urgent</th>
+                <th>Active</th>
+                <th>Created At</th>
+                <th>Expires At</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% if notices %}
+                {% for notice in notices %}
+                <tr class="{% if not notice.is_active %}inactive{% endif %} {% if notice.is_urgent %}urgent{% endif %}">
+                    <td>{{ notice.id }}</td>
+                    <td>{{ notice.title }}</td>
+                    <td>{{ notice.category.capitalize() }}</td>
+                    <td>{{ 'Yes' if notice.is_urgent else 'No' }}</td>
+                    <td>{{ 'Yes' if notice.is_active else 'No' }}</td>
+                    <td>{{ notice.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td>{{ notice.expires_at.strftime('%Y-%m-%d') if notice.expires_at else 'N/A' }}</td>
+                    <td class="actions">
+                        <a href="{{ url_for('edit_notice', id=notice.id) }}" class="button small edit">Edit</a>
+                        <form action="{{ url_for('delete_notice', id=notice.id) }}" method="post" style="display:inline;">
+                            <button type="submit" class="button small delete" onclick="return confirm('Are you sure you want to delete this notice?');">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr>
+                    <td colspan="8">No notices created yet.</td>
+                </tr>
+            {% endif %}
+        </tbody>
+    </table>
+{% endblock %}
+
+--- END FILE: templates\admin_dashboard.html ---
+
+--- START FILE: templates\admin_login.html ---
+
+{% extends '_base.html' %}
+
+{% block title %}Admin Login{% endblock %}
+
+{% block content %}
+    <h2>Admin Login</h2>
+    <form method="post" class="auth-form">
+        <label for="username">Username:</label>
+        <input type="text" id="username" name="username" required>
+
+        <label for="password">Password:</label>
+        <input type="password" id="password" name="password" required>
+
+        <button type="submit">Log In</button>
+    </form>
+    <p>Default Admin: <strong>admin</strong> / <strong>password</strong> (Please change immediately in `app.py` for production!)</p>
+{% endblock %}
+
+--- END FILE: templates\admin_login.html ---
+
+--- START FILE: templates\create_edit_notice.html ---
+
+{% extends '_base.html' %}
+
+{% block title %}{% if notice %}Edit Notice{% else %}Create New Notice{% endif %} - Admin{% endblock %}
+
+{% block content %}
+    <h2>{% if notice %}Edit Notice{% else %}Create New Notice{% endif %}</h2>
+    <form method="post" class="notice-form">
+        <label for="title">Title:</label>
+        <input type="text" id="title" name="title" value="{{ notice.title if notice else '' }}" required>
+
+        <label for="content">Content:</label>
+        <textarea id="content" name="content" rows="10" required>{{ notice.content if notice else '' }}</textarea>
+
+        <label for="category">Category:</label>
+        <select id="category" name="category" required onchange="toggleEventFields()">
+            <option value="announcement" {% if notice and notice.category == 'announcement' %}selected{% endif %}>Announcement</option>
+            <option value="event" {% if notice and notice.category == 'event' %}selected{% endif %}>Event</option>
+            <option value="urgent" {% if notice and notice.category == 'urgent' %}selected{% endif %}>Urgent Notice</option>
+        </select>
+
+        <div class="checkbox-group">
+            <input type="checkbox" id="is_urgent" name="is_urgent" {% if notice and notice.is_urgent %}checked{% endif %}>
+            <label for="is_urgent">Mark as Urgent</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" id="is_active" name="is_active" {% if notice is none or notice.is_active %}checked{% endif %}>
+            <label for="is_active">Make Active (Visible to Public)</label>
+        </div>
+
+        <label for="expires_at">Expires On (Optional):</label>
+        <input type="date" id="expires_at" name="expires_at" value="{{ notice.expires_at.strftime('%Y-%m-%d') if notice and notice.expires_at else '' }}">
+
+        <div id="event_fields" style="display: {% if notice and notice.category == 'event' %}block{% else %}none{% endif %};">
+            <h3>Event Details</h3>
+            <label for="event_date">Event Date:</label>
+            <input type="date" id="event_date" name="event_date" value="{{ notice.event_date if notice and notice.event_date else '' }}">
+
+            <label for="event_time">Event Time:</label>
+            <input type="time" id="event_time" name="event_time" value="{{ notice.event_time if notice and notice.event_time else '' }}">
+
+            <label for="event_location">Event Location:</label>
+            <input type="text" id="event_location" name="event_location" value="{{ notice.event_location if notice and notice.event_location else '' }}">
+        </div>
+
+        <button type="submit">{% if notice %}Update Notice{% else %}Create Notice{% endif %}</button>
+    </form>
+
+    <script>
+        function toggleEventFields() {
+            var category = document.getElementById('category').value;
+            var eventFields = document.getElementById('event_fields');
+            if (category === 'event') {
+                eventFields.style.display = 'block';
+            } else {
+                eventFields.style.display = 'none';
+            }
+        }
+        // Initial call in case of existing event notice on page load
+        document.addEventListener('DOMContentLoaded', toggleEventFields);
+    </script>
+{% endblock %}
+
+--- END FILE: templates\create_edit_notice.html ---
+
+--- START FILE: templates\index.html ---
+
+{% extends '_base.html' %}
+
+{% block title %}Notices - Community Notice Board{% endblock %}
+
+{% block content %}
+    <h2>Current Notices</h2>
+    <div class="notice-list">
+        {% if notices %}
+            {% for notice in notices %}
+                <div class="notice-item {% if notice.is_urgent %}urgent{% endif %} {% if notice.category == 'event' %}event{% endif %}">
+                    <h3>{{ notice.title }}</h3>
+                    <p class="notice-meta">
+                        Category: <strong>{{ notice.category.capitalize() }}</strong> |
+                        Posted: {{ notice.created_at.strftime('%Y-%m-%d %H:%M') }}
+                        {% if notice.expires_at %}
+                            | Expires: {{ notice.expires_at.strftime('%Y-%m-%d') }}
+                        {% endif %}
+                    </p>
+                    <p>{{ notice.content | safe }}</p> {# Using safe if you expect HTML content from admin #}
+
+                    {% if notice.category == 'event' %}
+                        <div class="event-details">
+                            <p><strong>Date:</strong> {{ notice.event_date }}</p>
+                            <p><strong>Time:</strong> {{ notice.event_time }}</p>
+                            <p><strong>Location:</strong> {{ notice.event_location }}</p>
+                        </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No active notices at the moment. Check back soon!</p>
+        {% endif %}
+    </div>
+{% endblock %}
+
+--- END FILE: templates\index.html ---
+
+--- START FILE: templates\_base.html ---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Community Notice Board{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1><a href="{{ url_for('index') }}">Community Notice Board</a></h1>
+            <nav>
+                <a href="{{ url_for('index') }}">Home</a>
+                {% if session.get('logged_in') %}
+                    <a href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+                    <a href="{{ url_for('admin_logout') }}">Logout</a>
+                {% else %}
+                    <a href="{{ url_for('admin_login') }}">Admin Login</a>
+                {% endif %}
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <ul class="flashes">
+                    {% for category, message in messages %}
+                        <li class="flash-{{ category }}">{{ message }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer>
+        <div class="container">
+            <p>&copy; {{ datetime.now().year }} Community Notice Board</p>
+        </div>
+    </footer>
+</body>
+</html>
+
+--- END FILE: templates\_base.html ---
+
+---------------------------------------------------------------------------------------------------------
+
+(venv) PS D:\72 projects of python\Community Notice Board\community_notice_board> flask run   
+ * Debug mode: off
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5000
+Press CTRL+C to quit
+[2025-09-06 10:01:07,093] ERROR in app: Exception on /admin/dashboard [GET]
+Traceback (most recent call last):
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
+    return view(**kwargs)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
+    ).fetchall()
+      ~~~~~~~~^^
+  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
+    datepart, timepart = val.split(b" ")
+    ^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 2, got 1)
+127.0.0.1 - - [06/Sep/2025 10:01:07] "GET /admin/dashboard HTTP/1.1" 500 -
+127.0.0.1 - - [06/Sep/2025 10:01:12] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 10:01:12] "GET /static/style.css HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:01:12] "GET /static/favicon.ico HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:01:16] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 10:01:16] "GET /static/style.css HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:01:16] "GET /static/favicon.ico HTTP/1.1" 304 -
+[2025-09-06 10:01:19,748] ERROR in app: Exception on /admin/dashboard [GET]
+Traceback (most recent call last):
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
+    return view(**kwargs)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
+    ).fetchall()
+      ~~~~~~~~^^
+  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
+    datepart, timepart = val.split(b" ")
+    ^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 2, got 1)
+127.0.0.1 - - [06/Sep/2025 10:01:19] "GET /admin/dashboard HTTP/1.1" 500 -
+127.0.0.1 - - [06/Sep/2025 10:02:00] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 10:02:00] "GET /static/style.css HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:02:00] "GET /static/favicon.ico HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /admin/logout HTTP/1.1" 302 -
+127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /admin HTTP/1.1" 200 -
+127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /static/style.css HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /static/favicon.ico HTTP/1.1" 304 -
+127.0.0.1 - - [06/Sep/2025 10:02:05] "POST /admin HTTP/1.1" 302 -
+[2025-09-06 10:02:05,043] ERROR in app: Exception on /admin/dashboard [GET]
+Traceback (most recent call last):
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
+    rv = self.handle_user_exception(e)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
+    return view(**kwargs)
+  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
+    ).fetchall()
+      ~~~~~~~~^^
+  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
+    datepart, timepart = val.split(b" ")
+    ^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 2, got 1)
+127.0.0.1 - - [06/Sep/2025 10:02:05] "GET /admin/dashboard HTTP/1.1" 500 -

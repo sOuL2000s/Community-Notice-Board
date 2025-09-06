@@ -1,0 +1,34 @@
+{% extends '_base.html' %}
+
+{% block title %}Notices - Community Notice Board{% endblock %}
+
+{% block content %}
+    <h2>Current Notices</h2>
+    <div class="notice-list">
+        {% if notices %}
+            {% for notice in notices %}
+                <div class="notice-item {% if notice.is_urgent %}urgent{% endif %} {% if notice.category == 'event' %}event{% endif %}">
+                    <h3>{{ notice.title }}</h3>
+                    <p class="notice-meta">
+                        Category: <strong>{{ notice.category.capitalize() }}</strong> |
+                        Posted: {{ notice.created_at.strftime('%Y-%m-%d %H:%M') }}
+                        {% if notice.expires_at %}
+                            | Expires: {{ notice.expires_at.strftime('%Y-%m-%d') }}
+                        {% endif %}
+                    </p>
+                    <p>{{ notice.content | safe }}</p> {# Using safe if you expect HTML content from admin #}
+
+                    {% if notice.category == 'event' %}
+                        <div class="event-details">
+                            <p><strong>Date:</strong> {{ notice.event_date }}</p>
+                            <p><strong>Time:</strong> {{ notice.event_time }}</p>
+                            <p><strong>Location:</strong> {{ notice.event_location }}</p>
+                        </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No active notices at the moment. Check back soon!</p>
+        {% endif %}
+    </div>
+{% endblock %}

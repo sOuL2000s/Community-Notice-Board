@@ -1,0 +1,61 @@
+{% extends '_base.html' %}
+
+{% block title %}{% if notice %}Edit Notice{% else %}Create New Notice{% endif %} - Admin{% endblock %}
+
+{% block content %}
+    <h2>{% if notice %}Edit Notice{% else %}Create New Notice{% endif %}</h2>
+    <form method="post" class="notice-form">
+        <label for="title">Title:</label>
+        <input type="text" id="title" name="title" value="{{ notice.title if notice else '' }}" required>
+
+        <label for="content">Content:</label>
+        <textarea id="content" name="content" rows="10" required>{{ notice.content if notice else '' }}</textarea>
+
+        <label for="category">Category:</label>
+        <select id="category" name="category" required onchange="toggleEventFields()">
+            <option value="announcement" {% if notice and notice.category == 'announcement' %}selected{% endif %}>Announcement</option>
+            <option value="event" {% if notice and notice.category == 'event' %}selected{% endif %}>Event</option>
+            <option value="urgent" {% if notice and notice.category == 'urgent' %}selected{% endif %}>Urgent Notice</option>
+        </select>
+
+        <div class="checkbox-group">
+            <input type="checkbox" id="is_urgent" name="is_urgent" {% if notice and notice.is_urgent %}checked{% endif %}>
+            <label for="is_urgent">Mark as Urgent</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" id="is_active" name="is_active" {% if notice is none or notice.is_active %}checked{% endif %}>
+            <label for="is_active">Make Active (Visible to Public)</label>
+        </div>
+
+        <label for="expires_at">Expires On (Optional):</label>
+        <input type="date" id="expires_at" name="expires_at" value="{{ notice.expires_at.strftime('%Y-%m-%d') if notice and notice.expires_at else '' }}">
+
+        <div id="event_fields" style="display: {% if notice and notice.category == 'event' %}block{% else %}none{% endif %};">
+            <h3>Event Details</h3>
+            <label for="event_date">Event Date:</label>
+            <input type="date" id="event_date" name="event_date" value="{{ notice.event_date if notice and notice.event_date else '' }}">
+
+            <label for="event_time">Event Time:</label>
+            <input type="time" id="event_time" name="event_time" value="{{ notice.event_time if notice and notice.event_time else '' }}">
+
+            <label for="event_location">Event Location:</label>
+            <input type="text" id="event_location" name="event_location" value="{{ notice.event_location if notice and notice.event_location else '' }}">
+        </div>
+
+        <button type="submit">{% if notice %}Update Notice{% else %}Create Notice{% endif %}</button>
+    </form>
+
+    <script>
+        function toggleEventFields() {
+            var category = document.getElementById('category').value;
+            var eventFields = document.getElementById('event_fields');
+            if (category === 'event') {
+                eventFields.style.display = 'block';
+            } else {
+                eventFields.style.display = 'none';
+            }
+        }
+        // Initial call in case of existing event notice on page load
+        document.addEventListener('DOMContentLoaded', toggleEventFields);
+    </script>
+{% endblock %}
