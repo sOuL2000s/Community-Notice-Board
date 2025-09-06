@@ -10,7 +10,7 @@ print(os.urandom(24).hex()) # Run this in a Python interpreter to get a random k
 
 import sqlite3
 from flask import Flask, render_template, request, url_for, flash, redirect, g, session
-from datetime import datetime
+from datetime import datetime # Make sure this import is at the top of app.py
 import functools
 
 # --- Application Setup ---
@@ -29,11 +29,9 @@ def get_db():
     if 'db' not in g:
         g.db = sqlite3.connect(
             DATABASE,
-            detect_types=sqlite3.PARSE_DECLTYPES
+            # REMOVE OR COMMENT OUT THIS LINE: detect_types=sqlite3.PARSE_DECLTYPES
         )
         g.db.row_factory = sqlite3.Row # Allows accessing columns by name
-        # --- ADD THIS LINE FOR CUSTOM TIMESTAMP CONVERTER ---
-        #g.db.create_function("DATETIME_FROM_ISO", 1, lambda s: datetime.fromisoformat(s) if s else None)
     return g.db
 
 def close_db(e=None):
@@ -79,10 +77,8 @@ ADMIN_PASSWORD = 'password' # **DO NOT USE THIS IN PRODUCTION**
 def index():
     """Public facing page: Displays active notices."""
     db = get_db()
-    now = datetime.now().isoformat()
-    # Fetch notices that are active and not expired
-    # Order by urgent first, then creation date
-    notices = db.execute(
+    now_iso = datetime.now().isoformat() # Renamed to avoid confusion with `now` in SQL
+    raw_notices = db.execute(
         """
         SELECT id, title, content, category, is_urgent, created_at, expires_at,
                event_date, event_time, event_location
@@ -90,9 +86,21 @@ def index():
         WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > ?)
         ORDER BY is_urgent DESC, created_at DESC
         """,
-        (now,)
+        (now_iso,) # Use now_iso here
     ).fetchall()
-    return render_template('index.html', notices=notices)
+
+    processed_notices = []
+    for notice_row in raw_notices:
+        notice = dict(notice_row) # Convert Row object to a mutable dictionary
+        if notice['expires_at']:
+            # Convert to datetime object only if it's not None
+            notice['expires_at'] = datetime.fromisoformat(notice['expires_at'])
+        # created_at should always have a value and needs conversion too
+        notice['created_at'] = datetime.fromisoformat(notice['created_at'])
+        processed_notices.append(notice)
+
+    return render_template('index.html', notices=processed_notices)
+
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin_login():
@@ -131,7 +139,7 @@ def admin_dashboard():
     raw_notices = db.execute(
         """
         SELECT id, title, category, is_urgent, created_at,
-               expires_at, -- Change back to just expires_at
+               expires_at,
                event_date, event_time, event_location, is_active
         FROM notices
         ORDER BY created_at DESC
@@ -155,7 +163,7 @@ def get_notice(notice_id, check_active=True):
     db = get_db()
     query = """
         SELECT id, title, content, category, is_urgent, created_at,
-               expires_at, -- Change back to just expires_at
+               expires_at,
                event_date, event_time, event_location, is_active
         FROM notices
         WHERE id = ?
@@ -347,6 +355,12 @@ if __name__ == "__main__":
 
 
 --- END FILE: combined.py ---
+
+--- START FILE: Procfile ---
+
+web: gunicorn --bind 0.0.0.0:$PORT app:app
+
+--- END FILE: Procfile ---
 
 --- START FILE: schema.sql ---
 
@@ -947,87 +961,6 @@ footer {
 
 --- END FILE: templates\_base.html ---
 
----------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------
 
-(venv) PS D:\72 projects of python\Community Notice Board\community_notice_board> flask run   
- * Debug mode: off
-WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
- * Running on http://127.0.0.1:5000
-Press CTRL+C to quit
-[2025-09-06 10:01:07,093] ERROR in app: Exception on /admin/dashboard [GET]
-Traceback (most recent call last):
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
-    response = self.full_dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
-    rv = self.handle_user_exception(e)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
-    rv = self.dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
-    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
-    return view(**kwargs)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
-    ).fetchall()
-      ~~~~~~~~^^
-  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
-    datepart, timepart = val.split(b" ")
-    ^^^^^^^^^^^^^^^^^^
-ValueError: not enough values to unpack (expected 2, got 1)
-127.0.0.1 - - [06/Sep/2025 10:01:07] "GET /admin/dashboard HTTP/1.1" 500 -
-127.0.0.1 - - [06/Sep/2025 10:01:12] "GET / HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 10:01:12] "GET /static/style.css HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:01:12] "GET /static/favicon.ico HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:01:16] "GET / HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 10:01:16] "GET /static/style.css HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:01:16] "GET /static/favicon.ico HTTP/1.1" 304 -
-[2025-09-06 10:01:19,748] ERROR in app: Exception on /admin/dashboard [GET]
-Traceback (most recent call last):
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
-    response = self.full_dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
-    rv = self.handle_user_exception(e)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
-    rv = self.dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
-    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
-    return view(**kwargs)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
-    ).fetchall()
-      ~~~~~~~~^^
-  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
-    datepart, timepart = val.split(b" ")
-    ^^^^^^^^^^^^^^^^^^
-ValueError: not enough values to unpack (expected 2, got 1)
-127.0.0.1 - - [06/Sep/2025 10:01:19] "GET /admin/dashboard HTTP/1.1" 500 -
-127.0.0.1 - - [06/Sep/2025 10:02:00] "GET / HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 10:02:00] "GET /static/style.css HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:02:00] "GET /static/favicon.ico HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /admin/logout HTTP/1.1" 302 -
-127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /admin HTTP/1.1" 200 -
-127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /static/style.css HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:02:03] "GET /static/favicon.ico HTTP/1.1" 304 -
-127.0.0.1 - - [06/Sep/2025 10:02:05] "POST /admin HTTP/1.1" 302 -
-[2025-09-06 10:02:05,043] ERROR in app: Exception on /admin/dashboard [GET]
-Traceback (most recent call last):
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 1511, in wsgi_app
-    response = self.full_dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 919, in full_dispatch_request
-    rv = self.handle_user_exception(e)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 917, in full_dispatch_request
-    rv = self.dispatch_request()
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\venv\Lib\site-packages\flask\app.py", line 902, in dispatch_request
-    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
-           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 59, in wrapped_view
-    return view(**kwargs)
-  File "D:\72 projects of python\Community Notice Board\community_notice_board\app.py", line 129, in admin_dashboard
-    ).fetchall()
-      ~~~~~~~~^^
-  File "C:\Users\Souparna\AppData\Local\Programs\Python\Python313\Lib\sqlite3\dbapi2.py", line 77, in convert_timestamp
-    datepart, timepart = val.split(b" ")
-    ^^^^^^^^^^^^^^^^^^
-ValueError: not enough values to unpack (expected 2, got 1)
-127.0.0.1 - - [06/Sep/2025 10:02:05] "GET /admin/dashboard HTTP/1.1" 500 -
+Create some awesome notices so. I can show this beautifully on My Portfolio as a screen shot of this website. So can you make that happen? Beautify this and. Make it ready for My Portfolio. As I am only posting this project to GitHub, not deploying it anywhere. It'll be just as a proof of concept. That way. Thank you.
